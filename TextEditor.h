@@ -313,6 +313,7 @@ private:
 	Palette mPalette;
 	LanguageDefinition mLanguageDefinition;
 	RegexList mRegexList;
+	float mCursorAnimation;
 
 	bool mCheckMultilineComments;
 	Breakpoints mBreakpoints;
