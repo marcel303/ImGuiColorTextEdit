@@ -38,6 +38,7 @@ TextEditor::TextEditor()
 	, mColorRangeMin(0)
 	, mColorRangeMax(0)
 	, mSelectionMode(SelectionMode::Normal)
+	, mCursorAnimation(0.f)
 	, mCheckMultilineComments(true)
 {
 	SetPalette(GetDarkPalette());
@@ -514,6 +515,7 @@ void TextEditor::Render(const char* aTitle, const ImVec2& aSize, bool aBorder)
 				if (!ctrl)
 				{
 					mState.mCursorPosition = mInteractiveStart = mInteractiveEnd = SanitizeCoordinates(ScreenPosToCoordinates(ImGui::GetMousePos()));
+					mCursorAnimation = 0.f;
 					mSelectionMode = SelectionMode::Line;
 					SetSelection(mInteractiveStart, mInteractiveEnd, mSelectionMode);
 				}
@@ -526,6 +528,7 @@ void TextEditor::Render(const char* aTitle, const ImVec2& aSize, bool aBorder)
 				if (!ctrl)
 				{
 					mState.mCursorPosition = mInteractiveStart = mInteractiveEnd = SanitizeCoordinates(ScreenPosToCoordinates(ImGui::GetMousePos()));
+					mCursorAnimation = 0.f;
 					if (mSelectionMode == SelectionMode::Line)
 						mSelectionMode = SelectionMode::Normal;
 					else
@@ -539,6 +542,7 @@ void TextEditor::Render(const char* aTitle, const ImVec2& aSize, bool aBorder)
 			{
 				printf("single\n");
 				mState.mCursorPosition = mInteractiveStart = mInteractiveEnd = SanitizeCoordinates(ScreenPosToCoordinates(ImGui::GetMousePos()));
+				mCursorAnimation = 0.f;
 				if (ctrl)
 					mSelectionMode = SelectionMode::Word;
 				else
@@ -551,6 +555,7 @@ void TextEditor::Render(const char* aTitle, const ImVec2& aSize, bool aBorder)
 			{
 				io.WantCaptureMouse = true;
 				mState.mCursorPosition = mInteractiveEnd = SanitizeCoordinates(ScreenPosToCoordinates(ImGui::GetMousePos()));
+				mCursorAnimation = 0.f;
 				SetSelection(mInteractiveStart, mInteractiveEnd, mSelectionMode);
 			}
 			else
@@ -656,18 +661,19 @@ void TextEditor::Render(const char* aTitle, const ImVec2& aSize, bool aBorder)
 
 				if (focused)
 				{
-					static auto timeStart = std::chrono::system_clock::now();
-					auto timeEnd = std::chrono::system_clock::now();
-					auto diff = timeEnd - timeStart;
-					auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(diff).count();
-					if (elapsed > 400)
+					mCursorAnimation += io.DeltaTime;
+					if (mCursorAnimation < .4f)
 					{
 						ImVec2 cstart(lineStartScreenPos.x + mCharAdvance.x * (cx + cTextStart), lineStartScreenPos.y);
 						ImVec2 cend(lineStartScreenPos.x + mCharAdvance.x * (cx + cTextStart) + (mOverwrite ? mCharAdvance.x : 1.0f), lineStartScreenPos.y + mCharAdvance.y);
 						drawList->AddRectFilled(cstart, cend, mPalette[(int)PaletteIndex::Cursor]);
-						if (elapsed > 800)
-							timeStart = timeEnd;
 					}
+					if (mCursorAnimation > .8f)
+						mCursorAnimation = 0.f;
+				}
+				else
+				{
+					mCursorAnimation = 0.f;
 				}
 			}
 
@@ -1644,6 +1650,8 @@ int TextEditor::TextDistanceToLineStart(const Coordinates& aFrom) const
 
 void TextEditor::EnsureCursorVisible()
 {
+	mCursorAnimation = 0.f;
+
 	if (!mWithinRender)
 	{
 		mScrollToCursor = true;
