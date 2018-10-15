@@ -142,25 +142,33 @@ public:
 	{
 		typedef std::pair<std::string, PaletteIndex> TokenRegexString;
 		typedef std::vector<TokenRegexString> TokenRegexStrings;
+		typedef bool (*TokenizeCallback)(const char * in_begin, const char * in_end, const char *& out_begin, const char *& out_end, PaletteIndex & paletteIndex);
 
 		std::string mName;
 		Keywords mKeywords;
 		Identifiers mIdentifiers;
 		Identifiers mPreprocIdentifiers;
 		std::string mCommentStart, mCommentEnd;
+		bool mAutoIndentation;
+
+		TokenizeCallback mTokenize;
 
 		TokenRegexStrings mTokenRegexStrings;
 
 		bool mCaseSensitive;
-		bool mAutoIndentation;
-
-		static LanguageDefinition CPlusPlus();
-		static LanguageDefinition HLSL();
-		static LanguageDefinition GLSL();
-		static LanguageDefinition C();
-		static LanguageDefinition SQL();
-		static LanguageDefinition AngelScript();
-		static LanguageDefinition Lua();
+		
+		LanguageDefinition()
+			: mTokenize(nullptr)
+		{
+		}
+		
+		static const LanguageDefinition& CPlusPlus();
+		static const LanguageDefinition& HLSL();
+		static const LanguageDefinition& GLSL();
+		static const LanguageDefinition& C();
+		static const LanguageDefinition& SQL();
+		static const LanguageDefinition& AngelScript();
+		static const LanguageDefinition& Lua();
 	};
 
 	TextEditor();
@@ -292,7 +300,7 @@ private:
 	void RemoveLine(int aStart, int aEnd);
 	void RemoveLine(int aIndex);
 	Line& InsertLine(int aIndex);
-	void EnterCharacter(Char aChar);
+	void EnterCharacter(Char aChar, bool aShift);
 	void BackSpace();
 	void DeleteSelection();
 	std::string GetWordUnderCursor() const;
@@ -310,7 +318,7 @@ private:
 	bool mWithinRender;
 	bool mScrollToCursor;
 	bool mTextChanged;
-	int  mTextStart;                   // position (in pixels) where a code line starts relative to the left of the TextEditor.
+	float  mTextStart;                   // position (in pixels) where a code line starts relative to the left of the TextEditor.
 	int  mLeftMargin;
 	bool mCursorPositionChanged;
 	int mColorRangeMin, mColorRangeMax;
@@ -327,4 +335,3 @@ private:
 	ImVec2 mCharAdvance;
 	Coordinates mInteractiveStart, mInteractiveEnd;
 };
-

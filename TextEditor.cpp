@@ -374,7 +374,7 @@ void TextEditor::RemoveLine(int aIndex)
 	for (auto& i : mErrorMarkers)
 	{
 		ErrorMarkers::value_type e(i.first > aIndex ? i.first - 1 : i.first, i.second);
-		if (e.first == aIndex)
+		if (e.first - 1 == aIndex)
 			continue;
 		etmp.insert(e);
 	}
@@ -512,8 +512,8 @@ void TextEditor::Render(const char* aTitle, const ImVec2& aSize, bool aBorder)
 			Cut();
 		else if (ctrl && !shift && !alt && ImGui::IsKeyPressed(ImGui::GetKeyIndex(ImGuiKey_A)))
 			SelectAll();
-		else if (!IsReadOnly() && !ctrl && !shift && !alt && ImGui::IsKeyPressed(ImGui::GetKeyIndex(ImGuiKey_Enter)) )
-			EnterCharacter('\n');
+		else if (!IsReadOnly() && !ctrl && !shift && !alt && ImGui::IsKeyPressed(ImGui::GetKeyIndex(ImGuiKey_Enter)))
+			EnterCharacter('\n', false);
 		else if (!IsReadOnly() && !ctrl && !alt)
 		{
 			for (size_t i = 0; i < sizeof(io.InputCharacters) / sizeof(io.InputCharacters[0]); i++)
@@ -523,7 +523,7 @@ void TextEditor::Render(const char* aTitle, const ImVec2& aSize, bool aBorder)
 				{
 					if (isprint(c) || isspace(c))
 					{
-						EnterCharacter((char)c);
+						EnterCharacter((char)c, shift);
 					}
 				}
 			}
@@ -673,7 +673,7 @@ void TextEditor::Render(const char* aTitle, const ImVec2& aSize, bool aBorder)
 
 			auto start = ImVec2(lineStartScreenPos.x + scrollX, lineStartScreenPos.y);
 
-			if (mBreakpoints.find(lineNo + 1) != mBreakpoints.end())
+			if (mBreakpoints.count(lineNo + 1) != 0)
 			{
 				auto end = ImVec2(lineStartScreenPos.x + contentSize.x + 2.0f * scrollX, lineStartScreenPos.y + mCharAdvance.y);
 				drawList->AddRectFilled(start, end, mPalette[(int)PaletteIndex::Breakpoint]);
@@ -853,7 +853,7 @@ void TextEditor::SetText(const std::string & aText)
 	Colorize();
 }
 
-void TextEditor::EnterCharacter(Char aChar)
+void TextEditor::EnterCharacter(Char aChar, bool aShift)
 {
 	assert(!mReadOnly);
 
@@ -863,10 +863,77 @@ void TextEditor::EnterCharacter(Char aChar)
 
 	if (HasSelection())
 	{
-		u.mRemoved = GetSelectedText();
-		u.mRemovedStart = mState.mSelectionStart;
-		u.mRemovedEnd = mState.mSelectionEnd;
-		DeleteSelection();
+		if (aChar == '\t')
+		{
+			auto start = mState.mSelectionStart;
+			auto end = mState.mSelectionEnd;
+
+			if (start > end)
+				std::swap(start, end);
+			start.mColumn = 0;
+//			end.mColumn = end.mLine < mLines.size() ? mLines[end.mLine].size() : 0;
+			if (end.mColumn == 0 && end.mLine > 0)
+			{
+				--end.mLine;
+				end.mColumn = mLines[end.mLine].size();
+			}
+
+			u.mRemovedStart = start;
+			u.mRemovedEnd = end;
+			u.mRemoved = GetText(start, end);
+
+			bool modified = false;
+
+			for (int i = start.mLine; i <= end.mLine; i++)
+			{
+				auto& line = mLines[i];
+				if (aShift)
+				{
+					if (line[0].mChar == '\t')
+					{
+						line.erase(line.begin());
+						if (i == end.mLine && end.mColumn > 0)
+							end.mColumn--;
+						modified = true;
+					}
+					else for (int j = 0; j < mTabSize && line[0].mChar == ' '; j++)
+					{
+						line.erase(line.begin());
+						if (i == end.mLine && end.mColumn > 0)
+							end.mColumn--;
+						modified = true;
+					}
+				}
+				else
+				{
+					line.insert(line.begin(), Glyph('\t', TextEditor::PaletteIndex::Background));
+					if (i == end.mLine)
+						++end.mColumn;
+					modified = true;
+				}
+			}
+
+			if (modified)
+			{
+				u.mAddedStart = start;
+				u.mAddedEnd = end;
+				u.mAdded = GetText(start, end);
+
+				mTextChanged = true;
+
+				AddUndo(u);
+				EnsureCursorVisible();
+			}
+
+			return;
+		}
+		else
+		{
+			u.mRemoved = GetSelectedText();
+			u.mRemovedStart = mState.mSelectionStart;
+			u.mRemovedEnd = mState.mSelectionEnd;
+			DeleteSelection();
+		}
 	}
 
 	auto coord = GetActualCursorCoordinates();
@@ -1305,7 +1372,6 @@ void TextEditor::BackSpace()
 	if (mLines.empty())
 		return;
 
-
 	UndoRecord u;
 	u.mBefore = mState;
 
@@ -1328,13 +1394,19 @@ void TextEditor::BackSpace()
 				return;
 
 			u.mRemoved = '\n';
-			u.mRemovedStart = u.mRemovedEnd = GetActualCursorCoordinates();
+			u.mRemovedStart = u.mRemovedEnd = Coordinates(pos.mLine - 1, (int)mLines[pos.mLine - 1].size());
 			Advance(u.mRemovedEnd);
 
 			auto& line = mLines[mState.mCursorPosition.mLine];
 			auto& prevLine = mLines[mState.mCursorPosition.mLine - 1];
 			auto prevSize = (int)prevLine.size();
 			prevLine.insert(prevLine.end(), line.begin(), line.end());
+
+			ErrorMarkers etmp;
+			for (auto& i : mErrorMarkers)
+				etmp.insert(ErrorMarkers::value_type(i.first - 1 == mState.mCursorPosition.mLine ? i.first - 1 : i.first, i.second));
+			mErrorMarkers = std::move(etmp);
+
 			RemoveLine(mState.mCursorPosition.mLine);
 			--mState.mCursorPosition.mLine;
 			mState.mCursorPosition.mColumn = prevSize;
@@ -1592,62 +1664,107 @@ void TextEditor::ColorizeRange(int aFromLine, int aToLine)
 		return;
 
 	std::string buffer;
+	std::cmatch results;
+	std::string id;
+	
 	int endLine = std::max(0, std::min((int)mLines.size(), aToLine));
 	for (int i = aFromLine; i < endLine; ++i)
 	{
 		bool preproc = false;
 		auto& line = mLines[i];
-		buffer.clear();
-		for (auto g : mLines[i])
+		
+		if (line.empty())
+			continue;
+		
+		buffer.resize(line.size());
+		for (size_t j = 0; j < line.size(); ++j)
 		{
-			buffer.push_back(g.mChar);
-			g.mColorIndex = PaletteIndex::Default;
+			auto& col = line[j];
+			buffer[j] = col.mChar;
+			col.mColorIndex = PaletteIndex::Default;
 		}
-
-		std::match_results<std::string::const_iterator> results;
-		auto last = buffer.cend();
-		for (auto first = buffer.cbegin(); first != last; ++first)
+		
+		const char * bufferBegin = &buffer.front();
+		const char * bufferEnd = bufferBegin + buffer.size();
+		
+		auto last = bufferEnd;
+		
+		for (auto first = bufferBegin; first != last; )
 		{
-			for (auto& p : mRegexList)
+			const char * token_begin = nullptr;
+			const char * token_end = nullptr;
+			PaletteIndex token_color = PaletteIndex::Default;
+			
+			bool hasTokenizeResult = false;
+		
+			if (mLanguageDefinition.mTokenize != nullptr)
 			{
-				if (std::regex_search<std::string::const_iterator>(first, last, results, p.first, std::regex_constants::match_continuous))
+				if (mLanguageDefinition.mTokenize(first, last, token_begin, token_end, token_color))
+					hasTokenizeResult = true;
+			}
+			
+			if (hasTokenizeResult == false)
+			{
+			// todo : remove
+				//printf("using regex for %.*s\n", first + 10 < last ? 10 : int(last - first), first);
+				
+				for (auto& p : mRegexList)
 				{
-					auto v = *results.begin();
-					auto start = v.first - buffer.begin();
-					auto end = v.second - buffer.begin();
-					auto id = buffer.substr(start, end - start);
-					auto color = p.second;
-					if (color == PaletteIndex::Identifier)
+					if (std::regex_search(first, last, results, p.first, std::regex_constants::match_continuous))
 					{
-						if (!mLanguageDefinition.mCaseSensitive)
-							std::transform(id.begin(), id.end(), id.begin(), ::toupper);
-
-						if (!preproc)
-						{
-							if (mLanguageDefinition.mKeywords.find(id) != mLanguageDefinition.mKeywords.end())
-								color = PaletteIndex::Keyword;
-							else if (mLanguageDefinition.mIdentifiers.find(id) != mLanguageDefinition.mIdentifiers.end())
-								color = PaletteIndex::KnownIdentifier;
-							else if (mLanguageDefinition.mPreprocIdentifiers.find(id) != mLanguageDefinition.mPreprocIdentifiers.end())
-								color = PaletteIndex::PreprocIdentifier;
-						}
-						else
-						{
-							if (mLanguageDefinition.mPreprocIdentifiers.find(id) != mLanguageDefinition.mPreprocIdentifiers.end())
-								color = PaletteIndex::PreprocIdentifier;
-							else
-								color = PaletteIndex::Identifier;
-						}
+						hasTokenizeResult = true;
+						
+						auto& v = *results.begin();
+						token_begin = v.first;
+						token_end = v.second;
+						token_color = p.second;
+						break;
 					}
-					else if (color == PaletteIndex::Preprocessor)
-					{
-						preproc = true;
-					}
-					for (int j = (int)start; j < (int)end; ++j)
-						line[j].mColorIndex = color;
-					first += end - start - 1;
-					break;
 				}
+			}
+			
+			if (hasTokenizeResult == false)
+			{
+				first++;
+			}
+			else
+			{
+				const size_t token_length = token_end - token_begin;
+				
+				if (token_color == PaletteIndex::Identifier)
+				{
+					id.assign(token_begin, token_end);
+					
+				// todo : allmost all language definitions use lower case to specify keywords, so shouldn't this use ::tolower ?
+					if (!mLanguageDefinition.mCaseSensitive)
+						std::transform(id.begin(), id.end(), id.begin(), ::toupper);
+
+					if (!preproc)
+					{
+						if (mLanguageDefinition.mKeywords.count(id) != 0)
+							token_color = PaletteIndex::Keyword;
+						else if (mLanguageDefinition.mIdentifiers.count(id) != 0)
+							token_color = PaletteIndex::KnownIdentifier;
+						else if (mLanguageDefinition.mPreprocIdentifiers.count(id) != 0)
+							token_color = PaletteIndex::PreprocIdentifier;
+					}
+					else
+					{
+						if (mLanguageDefinition.mPreprocIdentifiers.count(id) != 0)
+							token_color = PaletteIndex::PreprocIdentifier;
+						else
+							token_color = PaletteIndex::Identifier;
+					}
+				}
+				else if (token_color == PaletteIndex::Preprocessor)
+				{
+					preproc = true;
+				}
+				
+				for (int j = 0; j < token_length; ++j)
+					line[(token_begin - bufferBegin) + j].mColorIndex = token_color;
+				
+				first = token_end;
 			}
 		}
 	}
@@ -1668,7 +1785,7 @@ void TextEditor::ColorizeInternal()
 			auto& line = mLines[i.mLine];
 			if (!line.empty())
 			{
-				auto g = line[i.mColumn];
+				auto& g = line[i.mColumn];
 				auto c = g.mChar;
 
 				bool inComment = commentStart <= i;
@@ -1729,7 +1846,8 @@ void TextEditor::ColorizeInternal()
 
 	if (mColorRangeMin < mColorRangeMax)
 	{
-		int to = std::min(mColorRangeMin + 10, mColorRangeMax);
+		const int increment = (mLanguageDefinition.mTokenize == nullptr) ? 10 : 10000;
+		const int to = std::min(mColorRangeMin + increment, mColorRangeMax);
 		ColorizeRange(mColorRangeMin, to);
 		mColorRangeMin = to;
 
@@ -1868,7 +1986,265 @@ void TextEditor::UndoRecord::Redo(TextEditor * aEditor)
 	aEditor->EnsureCursorVisible();
 }
 
-TextEditor::LanguageDefinition TextEditor::LanguageDefinition::CPlusPlus()
+static bool TokenizeCStyleComment(const char * in_begin, const char * in_end, const char *& out_begin, const char *& out_end)
+{
+	if (*in_begin != '/')
+		return false;
+	
+	if (in_begin + 1 < in_end && in_begin[1] == '/')
+	{
+		out_begin = in_begin;
+		out_end = in_end;
+		return true;
+	}
+	
+	return false;
+}
+
+static bool TokenizeCStylePreprocessorDirective(const char * in_begin, const char * in_end, const char *& out_begin, const char *& out_end)
+{
+	if (*in_begin != '#')
+		return false;
+	
+	const char * p = in_begin + 1;
+	
+	while (p < in_end && isblank(*p))
+		p++;
+	
+	bool hasText = false;
+	
+	while (p < in_end && ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || *p == '_'))
+	{
+		hasText = true;
+		p++;
+	}
+	
+	if (hasText)
+	{
+		out_begin = in_begin;
+		out_end = p;
+		return true;
+	}
+	
+	return false;
+}
+
+static bool TokenizeCStyleString(const char * in_begin, const char * in_end, const char *& out_begin, const char *& out_end)
+{
+	const char * p = in_begin;
+	
+	if (*p == '"')
+	{
+		p++;
+		
+		while (p < in_end)
+		{
+			// handle end of string
+			if (*p == '"')
+			{
+				out_begin = in_begin;
+				out_end = p + 1;
+				return true;
+			}
+			
+			// handle escape character for "
+			if (*p == '\\' && p + 1 < in_end && p[1] == '"')
+				p++;
+			
+			p++;
+		}
+	}
+	
+	return false;
+}
+
+static bool TokenizeCStyleCharacterLiteral(const char * in_begin, const char * in_end, const char *& out_begin, const char *& out_end)
+{
+	const char * p = in_begin;
+
+	if (*p == '\'')
+	{
+		p++;
+		
+		// handle escape characters
+		if (p < in_end && *p == '\\')
+			p++;
+		
+		if (p < in_end)
+			p++;
+		
+		// handle end of character literal
+		if (p < in_end && *p == '\'')
+		{
+			out_begin = in_begin;
+			out_end = p + 1;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static bool TokenizeCStyleIdentifier(const char * in_begin, const char * in_end, const char *& out_begin, const char *& out_end)
+{
+	const char * p = in_begin;
+	
+	if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || *p == '_')
+	{
+		p++;
+		
+		while ((p < in_end) && ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') || *p == '_'))
+			p++;
+		
+		out_begin = in_begin;
+		out_end = p;
+		return true;
+	}
+	
+	return false;
+}
+
+static bool TokenizeCStyleNumber(const char * in_begin, const char * in_end, const char *& out_begin, const char *& out_end)
+{
+	const char * p = in_begin;
+	
+	const bool startsWithNumber = *p >= '0' && *p <= '9';
+	
+	if (*p != '+' && *p != '-' && !startsWithNumber)
+		return false;
+	
+	p++;
+	
+	bool hasNumber = startsWithNumber;
+	
+	while (p < in_end && (*p >= '0' && *p <= '9'))
+	{
+		hasNumber = true;
+		
+		p++;
+	}
+	
+	if (hasNumber == false)
+		return false;
+	
+	bool isFloat = false;
+	bool isHex = false;
+	bool isBinary = false;
+	
+	if (p < in_end)
+	{
+		if (*p == '.')
+		{
+			isFloat = true;
+			
+			p++;
+			
+			while (p < in_end && (*p >= '0' && *p <= '9'))
+				p++;
+		}
+		else if (*p == 'x' || *p == 'X')
+		{
+			// hex formatted integer of the type 0xef80
+			
+			isHex = true;
+			
+			p++;
+			
+			while (p < in_end && ((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') || (*p >= 'A' && *p <= 'F')))
+				p++;
+		}
+		else if (*p == 'b' || *p == 'B')
+		{
+			// binary formatted integer of the type 0b01011101
+			
+			isBinary = true;
+			
+			p++;
+			
+			while (p < in_end && (*p >= '0' && *p <= '1'))
+				p++;
+		}
+	}
+	
+	if (isHex == false && isBinary == false)
+	{
+		// floating point exponent
+		if (p < in_end && (*p == 'e' || *p == 'E'))
+		{
+			isFloat = true;
+			
+			p++;
+			
+			if (p < in_end && (*p == '+' || *p == '-'))
+				p++;
+			
+			bool hasDigits = false;
+			
+			while (p < in_end && (*p >= '0' && *p <= '9'))
+			{
+				hasDigits = true;
+				
+				p++;
+			}
+			
+			if (hasDigits == false)
+				return false;
+		}
+		
+		// single precision floating point type
+		if (p < in_end && *p == 'f')
+			p++;
+	}
+	
+	if (isFloat == false)
+	{
+		// integer size type
+		while (p < in_end && (*p == 'u' || *p == 'U' || *p == 'l' || *p == 'L'))
+			p++;
+	}
+	
+	out_begin = in_begin;
+	out_end = p;
+	return true;
+}
+
+static bool TokenizeCStylePunctuation(const char * in_begin, const char * in_end, const char *& out_begin, const char *& out_end)
+{
+	switch (*in_begin)
+	{
+		case '[':
+		case ']':
+		case '{':
+		case '}':
+		case '!':
+		case '%':
+		case '^':
+		case '&':
+		case '*':
+		case '(':
+		case ')':
+		case '-':
+		case '+':
+		case '=':
+		case '~':
+		case '|':
+		case '<':
+		case '>':
+		case '?':
+		case ':':
+		case '/':
+		case ';':
+		case ',':
+		case '.':
+			out_begin = in_begin;
+			out_end = in_begin + 1;
+			return true;
+	}
+	
+	return false;
+}
+
+const TextEditor::LanguageDefinition& TextEditor::LanguageDefinition::CPlusPlus()
 {
 	static bool inited = false;
 	static LanguageDefinition langDef;
@@ -1895,18 +2271,38 @@ TextEditor::LanguageDefinition TextEditor::LanguageDefinition::CPlusPlus()
 			id.mDeclaration = "Built-in function";
 			langDef.mIdentifiers.insert(std::make_pair(std::string(k), id));
 		}
-
-		langDef.mTokenRegexStrings.push_back(std::make_pair<std::string, PaletteIndex>("//.*", PaletteIndex::Comment));
-		langDef.mTokenRegexStrings.push_back(std::make_pair<std::string, PaletteIndex>("[ \\t]*#[ \\t]*[a-zA-Z_]+", PaletteIndex::Preprocessor));
-		langDef.mTokenRegexStrings.push_back(std::make_pair<std::string, PaletteIndex>("L?\\\"(\\\\.|[^\\\"])*\\\"", PaletteIndex::String));
-		langDef.mTokenRegexStrings.push_back(std::make_pair<std::string, PaletteIndex>("\\'\\\\?[^\\']\\'", PaletteIndex::CharLiteral));
-		langDef.mTokenRegexStrings.push_back(std::make_pair<std::string, PaletteIndex>("0[xX][0-9a-fA-F]+[uU]?[lL]?[lL]?", PaletteIndex::Number));
-		langDef.mTokenRegexStrings.push_back(std::make_pair<std::string, PaletteIndex>("[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?[fF]?", PaletteIndex::Number));
-		langDef.mTokenRegexStrings.push_back(std::make_pair<std::string, PaletteIndex>("0[0-7]+[Uu]?[lL]?[lL]?", PaletteIndex::Number));
-		langDef.mTokenRegexStrings.push_back(std::make_pair<std::string, PaletteIndex>("[+-]?[0-9]+[Uu]?[lL]?[lL]?", PaletteIndex::Number));
-		langDef.mTokenRegexStrings.push_back(std::make_pair<std::string, PaletteIndex>("[a-zA-Z_][a-zA-Z0-9_]*", PaletteIndex::Identifier));
-		langDef.mTokenRegexStrings.push_back(std::make_pair<std::string, PaletteIndex>("[\\[\\]\\{\\}\\!\\%\\^\\&\\*\\(\\)\\-\\+\\=\\~\\|\\<\\>\\?\\/\\;\\,\\.]", PaletteIndex::Punctuation));
-
+		
+		langDef.mTokenize = [](const char * in_begin, const char * in_end, const char *& out_begin, const char *& out_end, PaletteIndex & paletteIndex) -> bool
+		{
+			paletteIndex = PaletteIndex::Max;
+			
+			while (in_begin < in_end && isblank(*in_begin))
+				in_begin++;
+			
+			if (in_begin == in_end)
+			{
+				out_begin = in_end;
+				out_end = in_end;
+				paletteIndex = PaletteIndex::Default;
+			}
+			else if (TokenizeCStyleComment(in_begin, in_end, out_begin, out_end))
+				paletteIndex = PaletteIndex::Comment;
+			else if (TokenizeCStylePreprocessorDirective(in_begin, in_end, out_begin, out_end))
+				paletteIndex = PaletteIndex::Preprocessor;
+			else if (TokenizeCStyleString(in_begin, in_end, out_begin, out_end))
+				paletteIndex = PaletteIndex::String;
+			else if (TokenizeCStyleCharacterLiteral(in_begin, in_end, out_begin, out_end))
+				paletteIndex = PaletteIndex::CharLiteral;
+			else if (TokenizeCStyleIdentifier(in_begin, in_end, out_begin, out_end))
+				paletteIndex = PaletteIndex::Identifier;
+			else if (TokenizeCStyleNumber(in_begin, in_end, out_begin, out_end))
+				paletteIndex = PaletteIndex::Number;
+			else if (TokenizeCStylePunctuation(in_begin, in_end, out_begin, out_end))
+				paletteIndex = PaletteIndex::Punctuation;
+			
+			return paletteIndex != PaletteIndex::Max;
+		};
+		
 		langDef.mCommentStart = "/*";
 		langDef.mCommentEnd = "*/";
 
@@ -1920,7 +2316,7 @@ TextEditor::LanguageDefinition TextEditor::LanguageDefinition::CPlusPlus()
 	return langDef;
 }
 
-TextEditor::LanguageDefinition TextEditor::LanguageDefinition::HLSL()
+const TextEditor::LanguageDefinition& TextEditor::LanguageDefinition::HLSL()
 {
 	static bool inited = false;
 	static LanguageDefinition langDef;
@@ -1992,7 +2388,7 @@ TextEditor::LanguageDefinition TextEditor::LanguageDefinition::HLSL()
 	return langDef;
 }
 
-TextEditor::LanguageDefinition TextEditor::LanguageDefinition::GLSL()
+const TextEditor::LanguageDefinition& TextEditor::LanguageDefinition::GLSL()
 {
 	static bool inited = false;
 	static LanguageDefinition langDef;
@@ -2041,7 +2437,7 @@ TextEditor::LanguageDefinition TextEditor::LanguageDefinition::GLSL()
 	return langDef;
 }
 
-TextEditor::LanguageDefinition TextEditor::LanguageDefinition::C()
+const TextEditor::LanguageDefinition& TextEditor::LanguageDefinition::C()
 {
 	static bool inited = false;
 	static LanguageDefinition langDef;
@@ -2066,17 +2462,37 @@ TextEditor::LanguageDefinition TextEditor::LanguageDefinition::C()
 			langDef.mIdentifiers.insert(std::make_pair(std::string(k), id));
 		}
 
-		langDef.mTokenRegexStrings.push_back(std::make_pair<std::string, PaletteIndex>("//.*", PaletteIndex::Comment));
-		langDef.mTokenRegexStrings.push_back(std::make_pair<std::string, PaletteIndex>("[ \\t]*#[ \\t]*[a-zA-Z_]+", PaletteIndex::Preprocessor));
-		langDef.mTokenRegexStrings.push_back(std::make_pair<std::string, PaletteIndex>("L?\\\"(\\\\.|[^\\\"])*\\\"", PaletteIndex::String));
-		langDef.mTokenRegexStrings.push_back(std::make_pair<std::string, PaletteIndex>("\\'\\\\?[^\\']\\'", PaletteIndex::CharLiteral));
-		langDef.mTokenRegexStrings.push_back(std::make_pair<std::string, PaletteIndex>("[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?[fF]?", PaletteIndex::Number));
-		langDef.mTokenRegexStrings.push_back(std::make_pair<std::string, PaletteIndex>("[+-]?[0-9]+[Uu]?[lL]?[lL]?", PaletteIndex::Number));
-		langDef.mTokenRegexStrings.push_back(std::make_pair<std::string, PaletteIndex>("0[0-7]+[Uu]?[lL]?[lL]?", PaletteIndex::Number));
-		langDef.mTokenRegexStrings.push_back(std::make_pair<std::string, PaletteIndex>("0[xX][0-9a-fA-F]+[uU]?[lL]?[lL]?", PaletteIndex::Number));
-		langDef.mTokenRegexStrings.push_back(std::make_pair<std::string, PaletteIndex>("[a-zA-Z_][a-zA-Z0-9_]*", PaletteIndex::Identifier));
-		langDef.mTokenRegexStrings.push_back(std::make_pair<std::string, PaletteIndex>("[\\[\\]\\{\\}\\!\\%\\^\\&\\*\\(\\)\\-\\+\\=\\~\\|\\<\\>\\?\\/\\;\\,\\.]", PaletteIndex::Punctuation));
-
+		langDef.mTokenize = [](const char * in_begin, const char * in_end, const char *& out_begin, const char *& out_end, PaletteIndex & paletteIndex) -> bool
+		{
+			paletteIndex = PaletteIndex::Max;
+			
+			while (in_begin < in_end && isblank(*in_begin))
+				in_begin++;
+			
+			if (in_begin == in_end)
+			{
+				out_begin = in_end;
+				out_end = in_end;
+				paletteIndex = PaletteIndex::Default;
+			}
+			else if (TokenizeCStyleComment(in_begin, in_end, out_begin, out_end))
+				paletteIndex = PaletteIndex::Comment;
+			else if (TokenizeCStylePreprocessorDirective(in_begin, in_end, out_begin, out_end))
+				paletteIndex = PaletteIndex::Preprocessor;
+			else if (TokenizeCStyleString(in_begin, in_end, out_begin, out_end))
+				paletteIndex = PaletteIndex::String;
+			else if (TokenizeCStyleCharacterLiteral(in_begin, in_end, out_begin, out_end))
+				paletteIndex = PaletteIndex::CharLiteral;
+			else if (TokenizeCStyleIdentifier(in_begin, in_end, out_begin, out_end))
+				paletteIndex = PaletteIndex::Identifier;
+			else if (TokenizeCStyleNumber(in_begin, in_end, out_begin, out_end))
+				paletteIndex = PaletteIndex::Number;
+			else if (TokenizeCStylePunctuation(in_begin, in_end, out_begin, out_end))
+				paletteIndex = PaletteIndex::Punctuation;
+			
+			return paletteIndex != PaletteIndex::Max;
+		};
+		
 		langDef.mCommentStart = "/*";
 		langDef.mCommentEnd = "*/";
 
@@ -2090,7 +2506,7 @@ TextEditor::LanguageDefinition TextEditor::LanguageDefinition::C()
 	return langDef;
 }
 
-TextEditor::LanguageDefinition TextEditor::LanguageDefinition::SQL()
+const TextEditor::LanguageDefinition& TextEditor::LanguageDefinition::SQL()
 {
 	static bool inited = false;
 	static LanguageDefinition langDef;
@@ -2154,7 +2570,7 @@ TextEditor::LanguageDefinition TextEditor::LanguageDefinition::SQL()
 	return langDef;
 }
 
-TextEditor::LanguageDefinition TextEditor::LanguageDefinition::AngelScript()
+const TextEditor::LanguageDefinition& TextEditor::LanguageDefinition::AngelScript()
 {
 	static bool inited = false;
 	static LanguageDefinition langDef;
@@ -2204,7 +2620,7 @@ TextEditor::LanguageDefinition TextEditor::LanguageDefinition::AngelScript()
 	return langDef;
 }
 
-TextEditor::LanguageDefinition TextEditor::LanguageDefinition::Lua()
+const TextEditor::LanguageDefinition& TextEditor::LanguageDefinition::Lua()
 {
 	static bool inited = false;
 	static LanguageDefinition langDef;
