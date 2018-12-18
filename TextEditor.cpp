@@ -867,6 +867,7 @@ void TextEditor::SetText(const std::string & aText)
 	}
 
 	mUndoBuffer.clear();
+	mUndoIndex = 0;
 
 	Colorize();
 }
@@ -896,6 +897,7 @@ void TextEditor::SetTextLines(const std::vector<std::string> & aLines)
 	mTextChanged = true;
 
 	mUndoBuffer.clear();
+	mUndoIndex = 0;
 
 	Colorize();
 }
